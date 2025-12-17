@@ -15,6 +15,8 @@
 #include <nvs_flash.h>
 #include "esp_sleep.h"
 #include <wifi_provisioning/manager.h>
+#include "esp_sntp.h"
+#include "time.h"
 
 #ifdef CONFIG_EXAMPLE_PROV_TRANSPORT_BLE
 #include <wifi_provisioning/scheme_ble.h>
@@ -120,6 +122,55 @@ const wifi_prov_event_handler_t wifi_prov_event_handler = { .event_cb = wifi_pro
 #define STORAGE_PATH "/spiffs/audio.mp3"
 #define NVS_VERSION_KEY "audio_ver"
 #define MAX_HTTP_BUFFER 1024
+
+
+void obtain_time(void) {
+    ESP_LOGI(TAG, "Initializing SNTP...");
+    
+    /* 1. Config & Start SNTP */
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "time.google.com");
+    esp_sntp_init();
+
+    /* 2. Wait for time to be set (with 10s timeout) */
+    int retry = 0;
+    const int retry_count = 10;
+    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count) {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+    }
+
+    /* 3. Verify and Log */
+    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+        ESP_LOGI(TAG, "Time updated via NTP!");
+        
+        // Get the raw Unix timestamp (which is now stored in the RTC)
+        time_t now;
+        time(&now);
+        ESP_LOGI(TAG, "RTC Initialized with Unix Timestamp: %ld", (long)now);
+    } else {
+        ESP_LOGE(TAG, "Could not get time from NTP!");
+    }
+}
+
+
+void print_current_date() {
+    time_t now;
+    struct tm timeinfo;
+    
+    /* 1. Get raw Unix timestamp from the RTC */
+    time(&now);
+    
+    /* 2. Convert to Readable Structure */
+    localtime_r(&now, &timeinfo);
+
+    /* 3. Create formatted string (YYYY-MM-DD HH:MM:SS) */
+    char strftime_buf[64];
+    strftime(strftime_buf, sizeof(strftime_buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+    /* 4. Print both in one line */
+    ESP_LOGI(TAG, "Unix Timestamp: %ld | Date: %s", (long)now, strftime_buf);
+}
 
 /* ---------------------------------------------------------
    STORAGE & DOWNLOAD LOGIC
@@ -430,6 +481,9 @@ void master_task(void *pvParameters)
         /* Wait for Connection */
         xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_EVENT, true, true, portMAX_DELAY);
 
+        /* The RTC is now set! It will keep counting even in Deep Sleep. */
+        obtain_time();
+
         /* Mount & Update */
         mount_storage();
         check_and_update_content();
@@ -451,7 +505,10 @@ void master_task(void *pvParameters)
        COMMON PLAYBACK LOGIC (Runs for BOTH Play Mode and Update Mode)
        --------------------------------------------------------- */
     ESP_LOGI(TAG, "Starting Audio Playback...");
-    
+
+    //Print Current Time
+    print_current_date();
+
     struct stat st;
     if (stat(STORAGE_PATH, &st) == 0) {
         ESP_LOGI(TAG, "File found. Playing...");
